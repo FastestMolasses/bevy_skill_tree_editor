@@ -7,7 +7,6 @@ use std::fs;
 use std::path::PathBuf;
 
 // TODO: UNDO / REDO SYSTEM
-// TODO: SHIFT + DRAG FOR PAN AS ANOTHER OPTION FOR PAN
 // TODO: BACKSPACE TO DELETE NODE
 // TODO: GRID PLACEMENT
 // TODO: IMAGE LOADING
@@ -208,30 +207,34 @@ fn update_camera(
         return;
     }
 
-    // Handle mouse wheel zoom
     for event in mouse_wheel.read() {
         editor_camera.target_zoom *= 1.0 - event.y * 0.1;
         editor_camera.target_zoom = editor_camera.target_zoom.clamp(0.1, 5.0);
     }
 
-    // Smooth zoom
     editor_camera.zoom = editor_camera
         .zoom
         .lerp(editor_camera.target_zoom, 10.0 * time.delta_secs());
 
-    // Handle middle mouse pan
-    if mouse_button.pressed(MouseButton::Middle) {
-        let mut delta = Vec2::ZERO;
+    let shift_pressed =
+        keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
+
+    if mouse_button.pressed(MouseButton::Middle)
+        || (shift_pressed && mouse_button.pressed(MouseButton::Left))
+    {
+        let mut pan_input_delta = Vec2::ZERO;
         for event in mouse_motion.read() {
             if let Some(e_delta) = event.delta {
-                delta -= e_delta;
+                pan_input_delta.x -= e_delta.x;
+                pan_input_delta.y += e_delta.y;
             }
         }
         let zoom = editor_camera.zoom;
-        editor_camera.pan_offset += delta * zoom;
+        editor_camera.pan_offset += pan_input_delta * zoom;
+    } else {
+        mouse_motion.clear();
     }
 
-    // Handle keyboard pan
     if !egui_input_state.wants_keyboard_input {
         let pan_speed = 500.0 * time.delta_secs() * editor_camera.zoom;
         if keyboard.pressed(KeyCode::ArrowLeft) {
@@ -248,7 +251,6 @@ fn update_camera(
         }
     }
 
-    // Apply camera transform
     camera_transform.scale = Vec3::splat(editor_camera.zoom);
     camera_transform.translation = editor_camera
         .pan_offset
@@ -267,8 +269,15 @@ fn handle_mouse_input(
     mut connection_mode: ResMut<ConnectionMode>,
     node_query: Query<(Entity, &SkillNode, &Transform)>,
     egui_input_state: Res<EguiInputState>,
+    keyboard: Res<ButtonInput<KeyCode>>,
 ) {
     if egui_input_state.wants_pointer_input {
+        return;
+    }
+
+    let shift_pressed =
+        keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
+    if shift_pressed && mouse_button.pressed(MouseButton::Left) {
         return;
     }
 
@@ -281,9 +290,7 @@ fn handle_mouse_input(
 
     if let Some(cursor_position) = window.cursor_position() {
         if let Ok(world_position) = camera.viewport_to_world_2d(camera_transform, cursor_position) {
-            // Right click to create new node
             if mouse_button.just_pressed(MouseButton::Right) {
-                // Check if we're clicking on a node
                 let mut clicked_node = None;
                 for (entity, node, transform) in node_query.iter() {
                     let distance = world_position.distance(transform.translation.xy());
@@ -294,9 +301,7 @@ fn handle_mouse_input(
                 }
 
                 if let Some(node_id) = clicked_node {
-                    // Toggle connection mode
                     if connection_mode.active && connection_mode.start_node.is_some() {
-                        // Complete connection
                         let start_id = connection_mode.start_node.unwrap();
                         if start_id != node_id {
                             skill_tree_data.connections.push(ConnectionData {
@@ -308,7 +313,6 @@ fn handle_mouse_input(
                         connection_mode.active = false;
                         connection_mode.start_node = None;
                     } else {
-                        // Start connection
                         connection_mode.active = true;
                         connection_mode.start_node = Some(node_id);
                     }
@@ -327,7 +331,6 @@ fn handle_mouse_input(
                     skill_tree_data.nodes.insert(node_data.id, entity);
                     editor_state.next_node_id += 1;
                 } else {
-                    // Cancel connection mode
                     connection_mode.active = false;
                     connection_mode.start_node = None;
                 }
@@ -344,12 +347,19 @@ fn handle_node_selection(
     mut selected_node: ResMut<SelectedNode>,
     mut drag_state: ResMut<DragState>,
     egui_input_state: Res<EguiInputState>,
+    keyboard: Res<ButtonInput<KeyCode>>,
 ) {
     if !mouse_button.just_pressed(MouseButton::Left) {
         return;
     }
 
     if egui_input_state.wants_pointer_input {
+        return;
+    }
+
+    let shift_pressed =
+        keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
+    if shift_pressed {
         return;
     }
 
@@ -363,7 +373,6 @@ fn handle_node_selection(
 
     if let Some(cursor_position) = window.cursor_position() {
         if let Ok(world_position) = camera.viewport_to_world_2d(camera_transform, cursor_position) {
-            // Check if we clicked on a node
             let mut closest_node = None;
             let mut closest_distance = f32::MAX;
 
@@ -396,8 +405,16 @@ fn handle_node_dragging(
     selected_node: Res<SelectedNode>,
     mut drag_state: ResMut<DragState>,
     egui_input_state: Res<EguiInputState>,
+    keyboard: Res<ButtonInput<KeyCode>>,
 ) {
     if !drag_state.dragging {
+        return;
+    }
+
+    let shift_pressed =
+        keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
+    if shift_pressed && mouse_button.pressed(MouseButton::Left) {
+        drag_state.dragging = false;
         return;
     }
 
@@ -494,13 +511,11 @@ fn draw_grid(mut gizmos: Gizmos, editor_camera: Res<EditorCamera>) {
 
     let color = Color::srgba(0.3, 0.3, 0.3, 0.2);
 
-    // Vertical lines
     for i in 0..=grid_count {
         let x = -half_size + (i as f32 * grid_size);
         gizmos.line_2d(Vec2::new(x, -half_size), Vec2::new(x, half_size), color);
     }
 
-    // Horizontal lines
     for i in 0..=grid_count {
         let y = -half_size + (i as f32 * grid_size);
         gizmos.line_2d(Vec2::new(-half_size, y), Vec2::new(half_size, y), color);
@@ -518,12 +533,10 @@ fn ui_system(
 ) {
     let ctx = contexts.ctx_mut();
 
-    // Top menu bar
     egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
         egui::menu::bar(ui, |ui| {
             ui.menu_button("File", |ui| {
                 if ui.button("New").clicked() {
-                    // Clear the tree
                     for entity in skill_tree_data.nodes.values() {
                         commands.entity(*entity).despawn();
                     }
@@ -548,13 +561,11 @@ fn ui_system(
         });
     });
 
-    // Side panel for node properties
     egui::SidePanel::left("properties_panel").show(ctx, |ui| {
         ui.heading("Skill Tree Editor");
 
         ui.separator();
 
-        // Connection mode indicator
         if connection_mode.active {
             ui.colored_label(egui::Color32::YELLOW, "Connection Mode Active");
             ui.label(format!(
@@ -638,13 +649,11 @@ fn ui_system(
                 ui.separator();
 
                 if ui.button("Delete Node").clicked() {
-                    // Remove connections involving this node
                     let node_id = node.id;
                     skill_tree_data
                         .connections
                         .retain(|conn| conn.from_id != node_id && conn.to_id != node_id);
 
-                    // Remove the node
                     skill_tree_data.nodes.remove(&node_id);
                     commands.entity(entity).despawn();
                     selected_node.entity = None;
@@ -657,7 +666,7 @@ fn ui_system(
             ui.label("Right-click to create a node");
             ui.label("Left-click to select a node");
             ui.label("Right-click on nodes to connect");
-            ui.label("Middle mouse to pan");
+            ui.label("Middle mouse or Shift + Left Drag to pan");
             ui.label("Scroll to zoom");
         }
 
@@ -679,7 +688,6 @@ fn ui_system(
         }
     });
 
-    // Save dialog
     if editor_state.show_save_dialog {
         egui::Window::new("Save Skill Tree")
             .collapsible(false)
@@ -706,7 +714,6 @@ fn ui_system(
             });
     }
 
-    // Load dialog
     if editor_state.show_load_dialog {
         egui::Window::new("Load Skill Tree")
             .collapsible(false)
@@ -717,14 +724,12 @@ fn ui_system(
                 ui.horizontal(|ui| {
                     if ui.button("Load").clicked() {
                         if let Ok(save_data) = load_skill_tree(&editor_state.load_path_buffer) {
-                            // Clear existing tree
                             for entity in skill_tree_data.nodes.values() {
                                 commands.entity(*entity).despawn();
                             }
                             skill_tree_data.nodes.clear();
                             skill_tree_data.connections.clear();
 
-                            // Load new tree
                             for node_data in save_data.nodes {
                                 let entity = spawn_node(&mut commands, &node_data);
                                 skill_tree_data.nodes.insert(node_data.id, entity);
@@ -767,7 +772,6 @@ fn spawn_node(commands: &mut Commands, node_data: &SkillNodeData) -> Entity {
             Visibility::default(),
         ))
         .with_children(|parent| {
-            // Node visual
             parent.spawn((
                 NodeVisual,
                 Sprite {
@@ -777,7 +781,6 @@ fn spawn_node(commands: &mut Commands, node_data: &SkillNodeData) -> Entity {
                 },
             ));
 
-            // Node label
             parent.spawn((
                 Text::new(&node_data.name),
                 TextColor(Color::WHITE),
