@@ -6,6 +6,12 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+// TODO: UNDO / REDO SYSTEM
+// TODO: SHIFT + DRAG FOR PAN AS ANOTHER OPTION FOR PAN
+// TODO: BACKSPACE TO DELETE NODE
+// TODO: GRID PLACEMENT
+// TODO: IMAGE LOADING
+
 fn main() {
     App::new()
         .add_plugins((
@@ -20,24 +26,28 @@ fn main() {
         .init_resource::<DragState>()
         .init_resource::<ConnectionMode>()
         .init_resource::<EditorCamera>()
+        .init_resource::<EguiInputState>()
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
                 ui_system,
-                update_camera,
-                handle_mouse_input,
-                handle_node_selection,
-                handle_node_dragging,
-                update_node_visuals,
-                draw_connections,
-                draw_grid,
+                update_egui_input_state.after(ui_system),
+                (
+                    update_camera,
+                    handle_mouse_input,
+                    handle_node_selection,
+                    handle_node_dragging,
+                    update_node_visuals,
+                    draw_connections,
+                    draw_grid,
+                )
+                    .after(update_egui_input_state),
             ),
         )
         .run();
 }
 
-// Data structures for serialization
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct SkillNodeData {
     id: u32,
@@ -86,7 +96,6 @@ enum ModifierType {
     Percentage,
 }
 
-// Runtime components
 #[derive(Component)]
 struct SkillNode {
     id: u32,
@@ -102,7 +111,6 @@ struct ConnectionVisual {
     to_id: u32,
 }
 
-// Resources
 #[derive(Resource, Default)]
 struct EditorState {
     file_path: Option<PathBuf>,
@@ -154,8 +162,13 @@ impl Default for EditorCamera {
     }
 }
 
+#[derive(Resource, Default)]
+struct EguiInputState {
+    wants_pointer_input: bool,
+    wants_keyboard_input: bool,
+}
+
 fn setup(mut commands: Commands) {
-    // Camera
     commands.spawn((
         Camera2d,
         Camera {
@@ -163,6 +176,16 @@ fn setup(mut commands: Commands) {
             ..default()
         },
     ));
+}
+
+fn update_egui_input_state(
+    mut egui_contexts: EguiContexts,
+    mut egui_input_state: ResMut<EguiInputState>,
+) {
+    if let Some(ctx) = egui_contexts.try_ctx_mut() {
+        egui_input_state.wants_pointer_input = ctx.wants_pointer_input();
+        egui_input_state.wants_keyboard_input = ctx.wants_keyboard_input();
+    }
 }
 
 fn update_camera(
@@ -173,10 +196,17 @@ fn update_camera(
     mut mouse_wheel: EventReader<MouseWheel>,
     keyboard: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
+    egui_input_state: Res<EguiInputState>,
 ) {
     let Ok(mut camera_transform) = camera_query.single_mut() else {
         return;
     };
+
+    if egui_input_state.wants_pointer_input {
+        mouse_wheel.clear();
+        mouse_motion.clear();
+        return;
+    }
 
     // Handle mouse wheel zoom
     for event in mouse_wheel.read() {
@@ -202,18 +232,20 @@ fn update_camera(
     }
 
     // Handle keyboard pan
-    let pan_speed = 500.0 * time.delta_secs() * editor_camera.zoom;
-    if keyboard.pressed(KeyCode::ArrowLeft) {
-        editor_camera.pan_offset.x -= pan_speed;
-    }
-    if keyboard.pressed(KeyCode::ArrowRight) {
-        editor_camera.pan_offset.x += pan_speed;
-    }
-    if keyboard.pressed(KeyCode::ArrowUp) {
-        editor_camera.pan_offset.y += pan_speed;
-    }
-    if keyboard.pressed(KeyCode::ArrowDown) {
-        editor_camera.pan_offset.y -= pan_speed;
+    if !egui_input_state.wants_keyboard_input {
+        let pan_speed = 500.0 * time.delta_secs() * editor_camera.zoom;
+        if keyboard.pressed(KeyCode::ArrowLeft) {
+            editor_camera.pan_offset.x -= pan_speed;
+        }
+        if keyboard.pressed(KeyCode::ArrowRight) {
+            editor_camera.pan_offset.x += pan_speed;
+        }
+        if keyboard.pressed(KeyCode::ArrowUp) {
+            editor_camera.pan_offset.y += pan_speed;
+        }
+        if keyboard.pressed(KeyCode::ArrowDown) {
+            editor_camera.pan_offset.y -= pan_speed;
+        }
     }
 
     // Apply camera transform
@@ -234,8 +266,12 @@ fn handle_mouse_input(
     selected_node: Res<SelectedNode>,
     mut connection_mode: ResMut<ConnectionMode>,
     node_query: Query<(Entity, &SkillNode, &Transform)>,
-    mut egui_contexts: EguiContexts,
+    egui_input_state: Res<EguiInputState>,
 ) {
+    if egui_input_state.wants_pointer_input {
+        return;
+    }
+
     let Ok(window) = windows.single() else {
         return;
     };
@@ -245,10 +281,8 @@ fn handle_mouse_input(
 
     if let Some(cursor_position) = window.cursor_position() {
         if let Ok(world_position) = camera.viewport_to_world_2d(camera_transform, cursor_position) {
-            // Right click to create new node (only if not over egui)
-            if mouse_button.just_pressed(MouseButton::Right)
-                && !is_cursor_over_egui(&mut egui_contexts)
-            {
+            // Right click to create new node
+            if mouse_button.just_pressed(MouseButton::Right) {
                 // Check if we're clicking on a node
                 let mut clicked_node = None;
                 for (entity, node, transform) in node_query.iter() {
@@ -279,7 +313,6 @@ fn handle_mouse_input(
                         connection_mode.start_node = Some(node_id);
                     }
                 } else if !connection_mode.active {
-                    // Create new node
                     let node_data = SkillNodeData {
                         id: editor_state.next_node_id,
                         name: format!("Node {}", editor_state.next_node_id),
@@ -310,18 +343,19 @@ fn handle_node_selection(
     node_query: Query<(Entity, &SkillNode, &Transform)>,
     mut selected_node: ResMut<SelectedNode>,
     mut drag_state: ResMut<DragState>,
-    mut egui_contexts: EguiContexts,
+    egui_input_state: Res<EguiInputState>,
 ) {
     if !mouse_button.just_pressed(MouseButton::Left) {
+        return;
+    }
+
+    if egui_input_state.wants_pointer_input {
         return;
     }
 
     let Ok(window) = windows.single() else {
         return;
     };
-    if is_cursor_over_egui(&mut egui_contexts) {
-        return;
-    }
 
     let Ok((camera, camera_transform)) = camera_query.single() else {
         return;
@@ -361,12 +395,18 @@ fn handle_node_dragging(
     mut node_query: Query<(&mut Transform, &mut SkillNode)>,
     selected_node: Res<SelectedNode>,
     mut drag_state: ResMut<DragState>,
+    egui_input_state: Res<EguiInputState>,
 ) {
     if !drag_state.dragging {
         return;
     }
 
     if mouse_button.just_released(MouseButton::Left) {
+        drag_state.dragging = false;
+        return;
+    }
+
+    if egui_input_state.wants_pointer_input {
         drag_state.dragging = false;
         return;
     }
@@ -442,7 +482,6 @@ fn draw_connections(
         }
 
         if let (Some(from), Some(to)) = (from_pos, to_pos) {
-            // For now, just draw straight lines
             gizmos.line_2d(from, to, Color::srgb(0.7, 0.6, 0.4));
         }
     }
@@ -493,14 +532,17 @@ fn ui_system(
                     selected_node.entity = None;
                     selected_node.id = None;
                     editor_state.file_path = None;
+                    ui.close_menu();
                 }
 
                 if ui.button("Save").clicked() {
                     editor_state.show_save_dialog = true;
+                    ui.close_menu();
                 }
 
                 if ui.button("Load").clicked() {
                     editor_state.show_load_dialog = true;
+                    ui.close_menu();
                 }
             });
         });
@@ -774,13 +816,4 @@ fn load_skill_tree(path: &str) -> Result<SkillTreeSaveData, Box<dyn std::error::
     let contents = fs::read_to_string(path)?;
     let save_data: SkillTreeSaveData = ron::from_str(&contents)?;
     Ok(save_data)
-}
-
-fn is_cursor_over_egui(contexts: &mut EguiContexts) -> bool {
-    let ctx = if let Some(ctxt) = contexts.try_ctx_mut() {
-        ctxt
-    } else {
-        return false;
-    };
-    ctx.is_pointer_over_area()
 }
