@@ -109,6 +109,13 @@ struct ConnectionVisual {
     to_id: u32,
 }
 
+#[derive(Default, Clone, Copy, PartialEq)]
+enum NextActionAfterSaveAs {
+    #[default]
+    None,
+    ShowLoadDialog,
+}
+
 #[derive(Resource, Default)]
 struct EditorState {
     current_file_path: Option<PathBuf>,
@@ -119,6 +126,9 @@ struct EditorState {
     next_node_id: u32,
     save_as_conflict_path: Option<PathBuf>,
     save_as_show_overwrite_prompt: bool,
+    dirty: bool,
+    show_unsaved_changes_on_load_dialog: bool,
+    next_action_after_save_as: NextActionAfterSaveAs,
 }
 
 #[derive(Resource, Default)]
@@ -332,6 +342,7 @@ fn handle_mouse_input(
                                 to_id: node_id,
                                 control_points: vec![],
                             });
+                            editor_state.dirty = true;
                         }
                         connection_mode.active = false;
                         connection_mode.start_node = None;
@@ -353,6 +364,7 @@ fn handle_mouse_input(
                     let entity = spawn_node(&mut commands, &node_data);
                     skill_tree_data.nodes.insert(node_data.id, entity);
                     editor_state.next_node_id += 1;
+                    editor_state.dirty = true;
                 } else {
                     connection_mode.active = false;
                     connection_mode.start_node = None;
@@ -430,6 +442,7 @@ fn handle_node_dragging(
     egui_input_state: Res<EguiInputState>,
     keyboard: Res<ButtonInput<KeyCode>>,
     grid_settings: Res<GridSettings>,
+    mut editor_state: ResMut<EditorState>,
 ) {
     if !drag_state.dragging {
         return;
@@ -471,6 +484,7 @@ fn handle_node_dragging(
                     }
                     transform.translation = new_position.extend(0.0);
                     node.data.position = new_position;
+                    editor_state.dirty = true;
                 }
             }
         }
@@ -483,6 +497,7 @@ fn handle_keyboard_shortcuts(
     mut selected_node: ResMut<SelectedNode>,
     mut skill_tree_data: ResMut<SkillTreeData>,
     egui_input_state: Res<EguiInputState>,
+    mut editor_state: ResMut<EditorState>,
 ) {
     if egui_input_state.wants_keyboard_input {
         return;
@@ -500,6 +515,7 @@ fn handle_keyboard_shortcuts(
 
                 selected_node.entity = None;
                 selected_node.id = None;
+                editor_state.dirty = true;
             }
         }
     }
@@ -584,6 +600,20 @@ fn draw_grid(
     }
 }
 
+fn open_load_dialog_sequence(editor_state: &mut EditorState) {
+    editor_state.available_ron_files.clear();
+    if let Ok(entries) = fs::read_dir(".") {
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_file() && path.extension().is_some_and(|ext| ext == "ron") {
+                editor_state.available_ron_files.push(path);
+            }
+        }
+    }
+    editor_state.available_ron_files.sort();
+    editor_state.show_load_dialog = true;
+}
+
 fn ui_system(
     mut contexts: EguiContexts,
     mut editor_state: ResMut<EditorState>,
@@ -609,6 +639,7 @@ fn ui_system(
                     selected_node.id = None;
                     editor_state.current_file_path = None;
                     editor_state.next_node_id = 0;
+                    editor_state.dirty = false;
                     ui.close_menu();
                 }
 
@@ -619,8 +650,8 @@ fn ui_system(
                             &skill_tree_data,
                             &node_query,
                         );
+                        editor_state.dirty = false;
                     } else {
-                        // Behaves like Save As
                         editor_state.save_as_file_name_buffer = editor_state
                             .current_file_path
                             .as_ref()
@@ -629,8 +660,8 @@ fn ui_system(
                             .unwrap_or("untitled.ron")
                             .to_string();
                         editor_state.show_save_as_dialog = true;
-                        editor_state.save_as_show_overwrite_prompt = false; // Reset overwrite state
-                        editor_state.save_as_conflict_path = None; // Reset overwrite state
+                        editor_state.save_as_show_overwrite_prompt = false;
+                        editor_state.save_as_conflict_path = None;
                     }
                     ui.close_menu();
                 }
@@ -644,24 +675,18 @@ fn ui_system(
                         .unwrap_or("untitled.ron")
                         .to_string();
                     editor_state.show_save_as_dialog = true;
-                    editor_state.save_as_show_overwrite_prompt = false; // Reset overwrite state
-                    editor_state.save_as_conflict_path = None; // Reset overwrite state
+                    editor_state.save_as_show_overwrite_prompt = false;
+                    editor_state.save_as_conflict_path = None;
+                    editor_state.next_action_after_save_as = NextActionAfterSaveAs::None;
                     ui.close_menu();
                 }
 
                 if ui.button("Load").clicked() {
-                    editor_state.available_ron_files.clear();
-                    if let Ok(entries) = fs::read_dir(".") {
-                        for entry in entries.filter_map(Result::ok) {
-                            let path = entry.path();
-                            if path.is_file() && path.extension().is_some_and(|ext| ext == "ron")
-                            {
-                                editor_state.available_ron_files.push(path);
-                            }
-                        }
+                    if editor_state.dirty {
+                        editor_state.show_unsaved_changes_on_load_dialog = true;
+                    } else {
+                        open_load_dialog_sequence(&mut editor_state);
                     }
-                    editor_state.available_ron_files.sort();
-                    editor_state.show_load_dialog = true;
                     ui.close_menu();
                 }
             });
@@ -697,51 +722,111 @@ fn ui_system(
                 ui.heading("Node Properties");
                 ui.label(format!("ID: {}", node.id));
                 ui.label("Name:");
-                ui.text_edit_singleline(&mut node.data.name);
+                if ui.text_edit_singleline(&mut node.data.name).changed() {
+                    editor_state.dirty = true;
+                }
                 ui.label("Description:");
-                ui.text_edit_multiline(&mut node.data.description);
+                if ui.text_edit_multiline(&mut node.data.description).changed() {
+                    editor_state.dirty = true;
+                }
                 ui.label("Image Name:");
-                ui.text_edit_singleline(&mut node.data.image_name);
+                if ui.text_edit_singleline(&mut node.data.image_name).changed() {
+                    editor_state.dirty = true;
+                }
+
                 ui.label("Node Type:");
-                egui::ComboBox::from_label("")
+                let mut node_type_changed = false;
+                egui::ComboBox::from_label("NodeType")
                     .selected_text(format!("{:?}", node.data.node_type))
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut node.data.node_type, NodeType::Normal, "Normal");
-                        ui.selectable_value(&mut node.data.node_type, NodeType::Notable, "Notable");
-                        ui.selectable_value(
-                            &mut node.data.node_type,
-                            NodeType::Keystone,
-                            "Keystone",
-                        );
-                        ui.selectable_value(&mut node.data.node_type, NodeType::Start, "Start");
+                        if ui
+                            .selectable_value(&mut node.data.node_type, NodeType::Normal, "Normal")
+                            .clicked()
+                        {
+                            node_type_changed = true;
+                        }
+                        if ui
+                            .selectable_value(
+                                &mut node.data.node_type,
+                                NodeType::Notable,
+                                "Notable",
+                            )
+                            .clicked()
+                        {
+                            node_type_changed = true;
+                        }
+                        if ui
+                            .selectable_value(
+                                &mut node.data.node_type,
+                                NodeType::Keystone,
+                                "Keystone",
+                            )
+                            .clicked()
+                        {
+                            node_type_changed = true;
+                        }
+                        if ui
+                            .selectable_value(&mut node.data.node_type, NodeType::Start, "Start")
+                            .clicked()
+                        {
+                            node_type_changed = true;
+                        }
                     });
+                if node_type_changed {
+                    editor_state.dirty = true;
+                }
+
                 ui.separator();
                 ui.heading("Stats");
-                let mut to_remove = None;
+                let mut stat_to_remove_idx = None;
                 for (i, stat) in node.data.stats.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
-                        ui.text_edit_singleline(&mut stat.stat_name);
-                        ui.add(egui::DragValue::new(&mut stat.value).speed(0.1));
-                        egui::ComboBox::from_id_salt(i)
+                        if ui.text_edit_singleline(&mut stat.stat_name).changed() {
+                            editor_state.dirty = true;
+                        }
+                        if ui
+                            .add(egui::DragValue::new(&mut stat.value).speed(0.1))
+                            .changed()
+                        {
+                            editor_state.dirty = true;
+                        }
+
+                        let mut mod_type_changed = false;
+                        egui::ComboBox::from_id_salt(format!("mod_type_{i}"))
                             .selected_text(format!("{:?}", stat.modifier_type))
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut stat.modifier_type,
-                                    ModifierType::Flat,
-                                    "Flat",
-                                );
-                                ui.selectable_value(
-                                    &mut stat.modifier_type,
-                                    ModifierType::Percentage,
-                                    "Percentage",
-                                );
+                                if ui
+                                    .selectable_value(
+                                        &mut stat.modifier_type,
+                                        ModifierType::Flat,
+                                        "Flat",
+                                    )
+                                    .clicked()
+                                {
+                                    mod_type_changed = true;
+                                }
+                                if ui
+                                    .selectable_value(
+                                        &mut stat.modifier_type,
+                                        ModifierType::Percentage,
+                                        "Percentage",
+                                    )
+                                    .clicked()
+                                {
+                                    mod_type_changed = true;
+                                }
                             });
+                        if mod_type_changed {
+                            editor_state.dirty = true;
+                        }
+
                         if ui.button("X").clicked() {
-                            to_remove = Some(i);
+                            stat_to_remove_idx = Some(i);
+                            editor_state.dirty = true;
                         }
                     });
                 }
-                if let Some(index) = to_remove {
+                if let Some(index) = stat_to_remove_idx {
                     node.data.stats.remove(index);
                 }
                 if ui.button("Add Stat").clicked() {
@@ -750,6 +835,7 @@ fn ui_system(
                         value: 0.0,
                         modifier_type: ModifierType::Flat,
                     });
+                    editor_state.dirty = true;
                 }
                 ui.separator();
                 if ui.button("Delete Node").clicked() {
@@ -761,6 +847,7 @@ fn ui_system(
                     commands.entity(entity).despawn();
                     selected_node.entity = None;
                     selected_node.id = None;
+                    editor_state.dirty = true;
                 }
             }
         } else {
@@ -774,16 +861,17 @@ fn ui_system(
         }
         ui.separator();
         ui.heading("Connections");
-        let mut to_remove = None;
+        let mut connection_to_remove_idx = None;
         for (i, connection) in skill_tree_data.connections.iter().enumerate() {
             ui.horizontal(|ui| {
                 ui.label(format!("{} -> {}", connection.from_id, connection.to_id));
                 if ui.button("Remove").clicked() {
-                    to_remove = Some(i);
+                    connection_to_remove_idx = Some(i);
+                    editor_state.dirty = true;
                 }
             });
         }
-        if let Some(index) = to_remove {
+        if let Some(index) = connection_to_remove_idx {
             skill_tree_data.connections.remove(index);
         }
     });
@@ -818,50 +906,110 @@ fn ui_system(
                 }
 
                 ui.horizontal(|ui| {
-                    if editor_state.save_as_show_overwrite_prompt {
-                        ui.add_enabled(false, egui::Button::new("Save"));
-                    } else if ui.button("Save").clicked()
-                        && !editor_state.save_as_file_name_buffer.is_empty() {
-                            let mut path_for_saving =
-                                PathBuf::from(&editor_state.save_as_file_name_buffer);
-                            if path_for_saving.extension().is_none_or(|ext| ext != "ron") {
-                                path_for_saving.set_extension("ron");
-                            }
+                    // Extract the value before defining the closure
+                    let save_as_show_overwrite_prompt = editor_state.save_as_show_overwrite_prompt;
+                    let save_as_file_name_buffer = editor_state.save_as_file_name_buffer.clone();
 
-                            if path_for_saving.exists() {
-                                editor_state.save_as_show_overwrite_prompt = true;
-                                editor_state.save_as_conflict_path = Some(path_for_saving);
-                            } else {
-                                save_skill_tree(
-                                    path_for_saving.to_str().unwrap_or_default(),
-                                    &skill_tree_data,
-                                    &node_query,
-                                );
-                                editor_state.current_file_path = Some(path_for_saving.clone());
-                                editor_state.show_save_as_dialog = false;
+                    let attempt_save = |es: &mut EditorState, path_to_save: PathBuf| {
+                        save_skill_tree(
+                            path_to_save.to_str().unwrap_or_default(),
+                            &skill_tree_data,
+                            &node_query,
+                        );
+                        es.current_file_path = Some(path_to_save.clone());
+                        es.dirty = false;
+                        es.show_save_as_dialog = false;
+                        es.save_as_show_overwrite_prompt = false;
+                        es.save_as_conflict_path = None;
+
+                        match es.next_action_after_save_as {
+                            NextActionAfterSaveAs::ShowLoadDialog => {
+                                open_load_dialog_sequence(es);
                             }
+                            NextActionAfterSaveAs::None => {}
                         }
+                        es.next_action_after_save_as = NextActionAfterSaveAs::None;
+                    };
+
+                    if save_as_show_overwrite_prompt {
+                        ui.add_enabled(false, egui::Button::new("Save"));
+                    } else if ui.button("Save").clicked() && !save_as_file_name_buffer.is_empty() {
+                        let mut path_for_saving = PathBuf::from(&save_as_file_name_buffer);
+                        if path_for_saving.extension().is_none_or(|ext| ext != "ron") {
+                            path_for_saving.set_extension("ron");
+                        }
+
+                        if path_for_saving.exists() {
+                            editor_state.save_as_show_overwrite_prompt = true;
+                            editor_state.save_as_conflict_path = Some(path_for_saving);
+                        } else {
+                            attempt_save(&mut editor_state, path_for_saving);
+                        }
+                    }
 
                     if ui.button("Cancel").clicked() {
                         editor_state.show_save_as_dialog = false;
                         editor_state.save_as_show_overwrite_prompt = false;
                         editor_state.save_as_conflict_path = None;
+                        editor_state.next_action_after_save_as = NextActionAfterSaveAs::None;
                     }
 
                     if editor_state.save_as_show_overwrite_prompt
-                        && ui.button("Overwrite").clicked() {
-                            if let Some(path_to_overwrite) = &editor_state.save_as_conflict_path {
-                                save_skill_tree(
-                                    path_to_overwrite.to_str().unwrap_or_default(),
-                                    &skill_tree_data,
-                                    &node_query,
-                                );
-                                editor_state.current_file_path = Some(path_to_overwrite.clone());
-                                editor_state.show_save_as_dialog = false;
-                                editor_state.save_as_show_overwrite_prompt = false;
-                                editor_state.save_as_conflict_path = None;
-                            }
+                        && ui.button("Overwrite").clicked()
+                    {
+                        if let Some(path_to_overwrite) = editor_state.save_as_conflict_path.clone()
+                        {
+                            attempt_save(&mut editor_state, path_to_overwrite);
                         }
+                    }
+                });
+            });
+    }
+
+    if editor_state.show_unsaved_changes_on_load_dialog {
+        egui::Window::new("Unsaved Changes")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label("You have unsaved changes. What would you like to do?");
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        if let Some(path) = editor_state.current_file_path.clone() {
+                            save_skill_tree(
+                                path.to_str().unwrap_or("skill_tree.ron"),
+                                &skill_tree_data,
+                                &node_query,
+                            );
+                            editor_state.dirty = false;
+                            open_load_dialog_sequence(&mut editor_state);
+                            editor_state.show_unsaved_changes_on_load_dialog = false;
+                        } else {
+                            editor_state.next_action_after_save_as =
+                                NextActionAfterSaveAs::ShowLoadDialog;
+                            editor_state.save_as_file_name_buffer = editor_state
+                                .current_file_path
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .and_then(|os_str| os_str.to_str())
+                                .unwrap_or("untitled.ron")
+                                .to_string();
+                            editor_state.show_save_as_dialog = true;
+                            editor_state.save_as_show_overwrite_prompt = false;
+                            editor_state.save_as_conflict_path = None;
+                            editor_state.show_unsaved_changes_on_load_dialog = false;
+                        }
+                    }
+                    if ui.button("Don't Save").clicked() {
+                        editor_state.dirty = false;
+                        open_load_dialog_sequence(&mut editor_state);
+                        editor_state.show_unsaved_changes_on_load_dialog = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        editor_state.show_unsaved_changes_on_load_dialog = false;
+                        editor_state.next_action_after_save_as = NextActionAfterSaveAs::None;
+                    }
                 });
             });
     }
@@ -910,6 +1058,7 @@ fn ui_system(
                         editor_state.next_node_id = max_id;
                         skill_tree_data.connections = save_data.connections;
                         editor_state.current_file_path = Some(path_to_load);
+                        editor_state.dirty = false;
                     }
                     editor_state.show_load_dialog = false;
                 }
@@ -920,6 +1069,7 @@ fn ui_system(
             });
     }
 }
+
 fn spawn_node(commands: &mut Commands, node_data: &SkillNodeData) -> Entity {
     let size = match node_data.node_type {
         NodeType::Normal => 40.0,
