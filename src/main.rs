@@ -7,8 +7,9 @@ use std::fs;
 use std::path::PathBuf;
 
 // TODO: UNDO / REDO SYSTEM
-// TODO: GRID PLACEMENT
 // TODO: IMAGE LOADING
+
+const GRID_SIZE: f32 = 50.0;
 
 fn main() {
     App::new()
@@ -25,6 +26,7 @@ fn main() {
         .init_resource::<ConnectionMode>()
         .init_resource::<EditorCamera>()
         .init_resource::<EguiInputState>()
+        .init_resource::<GridSettings>()
         .add_systems(Startup, setup)
         .add_systems(
             Update,
@@ -121,6 +123,12 @@ struct EditorState {
 }
 
 #[derive(Resource, Default)]
+struct GridSettings {
+    snap_to_grid: bool,
+    grid_size: f32,
+}
+
+#[derive(Resource, Default)]
 struct SkillTreeData {
     nodes: HashMap<u32, Entity>,
     connections: Vec<ConnectionData>,
@@ -167,7 +175,7 @@ struct EguiInputState {
     wants_keyboard_input: bool,
 }
 
-fn setup(mut commands: Commands) {
+fn setup(mut commands: Commands, mut grid_settings: ResMut<GridSettings>) {
     commands.spawn((
         Camera2d,
         Camera {
@@ -175,6 +183,7 @@ fn setup(mut commands: Commands) {
             ..default()
         },
     ));
+    grid_settings.grid_size = GRID_SIZE;
 }
 
 fn update_egui_input_state(
@@ -214,7 +223,7 @@ fn update_camera(
 
     editor_camera.zoom = editor_camera
         .zoom
-        .lerp(editor_camera.target_zoom, 10.0 * time.delta_secs());
+        .lerp(editor_camera.target_zoom, 6.0 * time.delta_secs());
 
     let shift_pressed =
         keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
@@ -257,6 +266,13 @@ fn update_camera(
         .extend(camera_transform.translation.z);
 }
 
+fn snap_to_grid_logic(position: Vec2, grid_size: f32) -> Vec2 {
+    Vec2::new(
+        (position.x / grid_size).round() * grid_size,
+        (position.y / grid_size).round() * grid_size,
+    )
+}
+
 fn handle_mouse_input(
     mut commands: Commands,
     mouse_button: Res<ButtonInput<MouseButton>>,
@@ -270,6 +286,7 @@ fn handle_mouse_input(
     node_query: Query<(Entity, &SkillNode, &Transform)>,
     egui_input_state: Res<EguiInputState>,
     keyboard: Res<ButtonInput<KeyCode>>,
+    grid_settings: Res<GridSettings>,
 ) {
     if egui_input_state.wants_pointer_input {
         return;
@@ -289,7 +306,13 @@ fn handle_mouse_input(
     };
 
     if let Some(cursor_position) = window.cursor_position() {
-        if let Ok(world_position) = camera.viewport_to_world_2d(camera_transform, cursor_position) {
+        if let Ok(mut world_position) =
+            camera.viewport_to_world_2d(camera_transform, cursor_position)
+        {
+            if grid_settings.snap_to_grid {
+                world_position = snap_to_grid_logic(world_position, grid_settings.grid_size);
+            }
+
             if mouse_button.just_pressed(MouseButton::Right) {
                 let mut clicked_node = None;
                 for (entity, node, transform) in node_query.iter() {
@@ -357,7 +380,6 @@ fn handle_node_selection(
         return;
     }
 
-    // If Shift is pressed, it might be a pan attempt, so don't do selection/deselection.
     let shift_pressed =
         keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
     if shift_pressed {
@@ -379,8 +401,6 @@ fn handle_node_selection(
 
             for (entity, node, transform) in node_query.iter() {
                 let distance = world_position.distance(transform.translation.xy());
-                // NOTE: CHANGE
-                // Assuming node radius is 30.0 for clicking
                 if distance < 30.0 && distance < closest_distance {
                     closest_distance = distance;
                     closest_node = Some((entity, node.id, transform.translation.xy()));
@@ -409,6 +429,7 @@ fn handle_node_dragging(
     mut drag_state: ResMut<DragState>,
     egui_input_state: Res<EguiInputState>,
     keyboard: Res<ButtonInput<KeyCode>>,
+    grid_settings: Res<GridSettings>,
 ) {
     if !drag_state.dragging {
         return;
@@ -444,7 +465,10 @@ fn handle_node_dragging(
                 camera.viewport_to_world_2d(camera_transform, cursor_position)
             {
                 if let Ok((mut transform, mut node)) = node_query.get_mut(entity) {
-                    let new_position = world_position + drag_state.offset;
+                    let mut new_position = world_position + drag_state.offset;
+                    if grid_settings.snap_to_grid {
+                        new_position = snap_to_grid_logic(new_position, grid_settings.grid_size);
+                    }
                     transform.translation = new_position.extend(0.0);
                     node.data.position = new_position;
                 }
@@ -464,14 +488,12 @@ fn handle_keyboard_shortcuts(
         return;
     }
 
-    // Delete currently selected node
     if keyboard.just_pressed(KeyCode::Backspace) {
         if let Some(node_id_to_delete) = selected_node.id {
             if let Some(entity_to_delete) = selected_node.entity {
-                // Remove connections involving this node
-                skill_tree_data
-                    .connections
-                    .retain(|conn| conn.from_id != node_id_to_delete && conn.to_id != node_id_to_delete);
+                skill_tree_data.connections.retain(|conn| {
+                    conn.from_id != node_id_to_delete && conn.to_id != node_id_to_delete
+                });
                 skill_tree_data.nodes.remove(&node_id_to_delete);
 
                 commands.entity(entity_to_delete).despawn();
@@ -537,8 +559,15 @@ fn draw_connections(
     }
 }
 
-fn draw_grid(mut gizmos: Gizmos, editor_camera: Res<EditorCamera>) {
-    let grid_size = 50.0;
+fn draw_grid(
+    mut gizmos: Gizmos,
+    editor_camera: Res<EditorCamera>,
+    grid_settings: Res<GridSettings>,
+) {
+    if !grid_settings.snap_to_grid {
+        return;
+    }
+    let grid_size = grid_settings.grid_size;
     let grid_count = 50;
     let half_size = (grid_count as f32 * grid_size) / 2.0;
 
@@ -563,6 +592,7 @@ fn ui_system(
     mut node_query: Query<&mut SkillNode>,
     mut commands: Commands,
     connection_mode: Res<ConnectionMode>,
+    mut grid_settings: ResMut<GridSettings>,
 ) {
     let ctx = contexts.ctx_mut();
 
@@ -591,11 +621,24 @@ fn ui_system(
                     ui.close_menu();
                 }
             });
+            ui.menu_button("View", |ui| {
+                if ui
+                    .checkbox(&mut grid_settings.snap_to_grid, "Snap to Grid")
+                    .clicked()
+                {
+                    ui.close_menu();
+                }
+            });
         });
     });
 
     egui::SidePanel::left("properties_panel").show(ctx, |ui| {
         ui.heading("Skill Tree Editor");
+
+        ui.separator();
+
+        ui.checkbox(&mut grid_settings.snap_to_grid, "Snap to Grid");
+        ui.add(egui::Slider::new(&mut grid_settings.grid_size, 10.0..=200.0).text("Grid Size"));
 
         ui.separator();
 
