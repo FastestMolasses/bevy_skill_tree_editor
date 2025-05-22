@@ -7,7 +7,6 @@ use std::fs;
 use std::path::PathBuf;
 
 // TODO: UNDO / REDO SYSTEM
-// TODO: BACKSPACE TO DELETE NODE
 // TODO: GRID PLACEMENT
 // TODO: IMAGE LOADING
 
@@ -40,6 +39,7 @@ fn main() {
                     update_node_visuals,
                     draw_connections,
                     draw_grid,
+                    handle_keyboard_shortcuts,
                 )
                     .after(update_egui_input_state),
             ),
@@ -357,6 +357,7 @@ fn handle_node_selection(
         return;
     }
 
+    // If Shift is pressed, it might be a pan attempt, so don't do selection/deselection.
     let shift_pressed =
         keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
     if shift_pressed {
@@ -378,6 +379,8 @@ fn handle_node_selection(
 
             for (entity, node, transform) in node_query.iter() {
                 let distance = world_position.distance(transform.translation.xy());
+                // NOTE: CHANGE
+                // Assuming node radius is 30.0 for clicking
                 if distance < 30.0 && distance < closest_distance {
                     closest_distance = distance;
                     closest_node = Some((entity, node.id, transform.translation.xy()));
@@ -445,6 +448,36 @@ fn handle_node_dragging(
                     transform.translation = new_position.extend(0.0);
                     node.data.position = new_position;
                 }
+            }
+        }
+    }
+}
+
+fn handle_keyboard_shortcuts(
+    mut commands: Commands,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut selected_node: ResMut<SelectedNode>,
+    mut skill_tree_data: ResMut<SkillTreeData>,
+    egui_input_state: Res<EguiInputState>,
+) {
+    if egui_input_state.wants_keyboard_input {
+        return;
+    }
+
+    // Delete currently selected node
+    if keyboard.just_pressed(KeyCode::Backspace) {
+        if let Some(node_id_to_delete) = selected_node.id {
+            if let Some(entity_to_delete) = selected_node.entity {
+                // Remove connections involving this node
+                skill_tree_data
+                    .connections
+                    .retain(|conn| conn.from_id != node_id_to_delete && conn.to_id != node_id_to_delete);
+                skill_tree_data.nodes.remove(&node_id_to_delete);
+
+                commands.entity(entity_to_delete).despawn();
+
+                selected_node.entity = None;
+                selected_node.id = None;
             }
         }
     }
