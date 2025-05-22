@@ -4,6 +4,7 @@ use bevy_egui::{EguiContexts, EguiPlugin, egui};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::mem;
 use std::path::PathBuf;
 
 const GRID_SIZE: f32 = 50.0;
@@ -114,6 +115,7 @@ enum NextActionAfterSaveAs {
     #[default]
     None,
     ShowLoadDialog,
+    CreateNewFile,
 }
 
 #[derive(Resource, Default)]
@@ -128,7 +130,9 @@ struct EditorState {
     save_as_show_overwrite_prompt: bool,
     dirty: bool,
     show_unsaved_changes_on_load_dialog: bool,
+    show_unsaved_changes_on_new_dialog: bool,
     next_action_after_save_as: NextActionAfterSaveAs,
+    trigger_pending_action: NextActionAfterSaveAs,
 }
 
 #[derive(Resource, Default)]
@@ -614,6 +618,24 @@ fn open_load_dialog_sequence(editor_state: &mut EditorState) {
     editor_state.show_load_dialog = true;
 }
 
+fn perform_new_file_action(
+    commands: &mut Commands,
+    editor_state: &mut EditorState,
+    skill_tree_data: &mut SkillTreeData,
+    selected_node: &mut SelectedNode,
+) {
+    for entity in skill_tree_data.nodes.values() {
+        commands.entity(*entity).despawn();
+    }
+    skill_tree_data.nodes.clear();
+    skill_tree_data.connections.clear();
+    selected_node.entity = None;
+    selected_node.id = None;
+    editor_state.current_file_path = None;
+    editor_state.next_node_id = 0;
+    editor_state.dirty = false;
+}
+
 fn ui_system(
     mut contexts: EguiContexts,
     mut editor_state: ResMut<EditorState>,
@@ -630,16 +652,17 @@ fn ui_system(
         egui::menu::bar(ui, |ui| {
             ui.menu_button("File", |ui| {
                 if ui.button("New").clicked() {
-                    for entity in skill_tree_data.nodes.values() {
-                        commands.entity(*entity).despawn();
+                    if editor_state.dirty {
+                        editor_state.show_unsaved_changes_on_new_dialog = true;
+                        editor_state.next_action_after_save_as = NextActionAfterSaveAs::None;
+                    } else {
+                        perform_new_file_action(
+                            &mut commands,
+                            &mut editor_state,
+                            &mut skill_tree_data,
+                            &mut selected_node,
+                        );
                     }
-                    skill_tree_data.nodes.clear();
-                    skill_tree_data.connections.clear();
-                    selected_node.entity = None;
-                    selected_node.id = None;
-                    editor_state.current_file_path = None;
-                    editor_state.next_node_id = 0;
-                    editor_state.dirty = false;
                     ui.close_menu();
                 }
 
@@ -684,6 +707,7 @@ fn ui_system(
                 if ui.button("Load").clicked() {
                     if editor_state.dirty {
                         editor_state.show_unsaved_changes_on_load_dialog = true;
+                        editor_state.next_action_after_save_as = NextActionAfterSaveAs::None;
                     } else {
                         open_load_dialog_sequence(&mut editor_state);
                     }
@@ -906,11 +930,11 @@ fn ui_system(
                 }
 
                 ui.horizontal(|ui| {
-                    // Extract the value before defining the closure
                     let save_as_show_overwrite_prompt = editor_state.save_as_show_overwrite_prompt;
-                    let save_as_file_name_buffer = editor_state.save_as_file_name_buffer.clone();
+                    let save_as_file_name_buffer_clone =
+                        editor_state.save_as_file_name_buffer.clone();
 
-                    let attempt_save = |es: &mut EditorState, path_to_save: PathBuf| {
+                    let mut attempt_save_action = |es: &mut EditorState, path_to_save: PathBuf| {
                         save_skill_tree(
                             path_to_save.to_str().unwrap_or_default(),
                             &skill_tree_data,
@@ -922,19 +946,16 @@ fn ui_system(
                         es.save_as_show_overwrite_prompt = false;
                         es.save_as_conflict_path = None;
 
-                        match es.next_action_after_save_as {
-                            NextActionAfterSaveAs::ShowLoadDialog => {
-                                open_load_dialog_sequence(es);
-                            }
-                            NextActionAfterSaveAs::None => {}
-                        }
+                        es.trigger_pending_action = es.next_action_after_save_as;
                         es.next_action_after_save_as = NextActionAfterSaveAs::None;
                     };
 
                     if save_as_show_overwrite_prompt {
                         ui.add_enabled(false, egui::Button::new("Save"));
-                    } else if ui.button("Save").clicked() && !save_as_file_name_buffer.is_empty() {
-                        let mut path_for_saving = PathBuf::from(&save_as_file_name_buffer);
+                    } else if ui.button("Save").clicked()
+                        && !save_as_file_name_buffer_clone.is_empty()
+                    {
+                        let mut path_for_saving = PathBuf::from(&save_as_file_name_buffer_clone);
                         if path_for_saving.extension().is_none_or(|ext| ext != "ron") {
                             path_for_saving.set_extension("ron");
                         }
@@ -943,7 +964,7 @@ fn ui_system(
                             editor_state.save_as_show_overwrite_prompt = true;
                             editor_state.save_as_conflict_path = Some(path_for_saving);
                         } else {
-                            attempt_save(&mut editor_state, path_for_saving);
+                            attempt_save_action(&mut editor_state, path_for_saving);
                         }
                     }
 
@@ -954,13 +975,58 @@ fn ui_system(
                         editor_state.next_action_after_save_as = NextActionAfterSaveAs::None;
                     }
 
-                    if editor_state.save_as_show_overwrite_prompt
-                        && ui.button("Overwrite").clicked()
-                    {
+                    if editor_state.save_as_show_overwrite_prompt {
                         if let Some(path_to_overwrite) = editor_state.save_as_conflict_path.clone()
                         {
-                            attempt_save(&mut editor_state, path_to_overwrite);
+                            if ui.button("Overwrite").clicked() {
+                                attempt_save_action(&mut editor_state, path_to_overwrite);
+                            }
                         }
+                    }
+                });
+            });
+    }
+
+    if editor_state.show_unsaved_changes_on_new_dialog {
+        egui::Window::new("Unsaved Changes")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label("You have unsaved changes. Starting a new file will discard them. What would you like to do?");
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        if let Some(path) = editor_state.current_file_path.clone() {
+                            save_skill_tree(
+                                path.to_str().unwrap_or("skill_tree.ron"),
+                                &skill_tree_data,
+                                &node_query,
+                            );
+                            perform_new_file_action(&mut commands, &mut editor_state, &mut skill_tree_data, &mut selected_node);
+                            editor_state.show_unsaved_changes_on_new_dialog = false;
+                        } else {
+                            editor_state.next_action_after_save_as = NextActionAfterSaveAs::CreateNewFile;
+                            editor_state.save_as_file_name_buffer = editor_state
+                                .current_file_path
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .and_then(|os_str| os_str.to_str())
+                                .unwrap_or("untitled.ron")
+                                .to_string();
+                            editor_state.show_save_as_dialog = true;
+                            editor_state.save_as_show_overwrite_prompt = false;
+                            editor_state.save_as_conflict_path = None;
+                            editor_state.show_unsaved_changes_on_new_dialog = false;
+                        }
+                    }
+                    if ui.button("Don't Save").clicked() {
+                        perform_new_file_action(&mut commands, &mut editor_state, &mut skill_tree_data, &mut selected_node);
+                        editor_state.show_unsaved_changes_on_new_dialog = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        editor_state.show_unsaved_changes_on_new_dialog = false;
+                        editor_state.next_action_after_save_as = NextActionAfterSaveAs::None;
                     }
                 });
             });
@@ -972,7 +1038,7 @@ fn ui_system(
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
-                ui.label("You have unsaved changes. What would you like to do?");
+                ui.label("You have unsaved changes. Loading a file will discard them. What would you like to do?");
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
@@ -1039,13 +1105,13 @@ fn ui_system(
                     if let Ok(save_data) =
                         load_skill_tree(path_to_load.to_str().unwrap_or_default())
                     {
-                        for entity in skill_tree_data.nodes.values() {
-                            commands.entity(*entity).despawn();
-                        }
-                        skill_tree_data.nodes.clear();
-                        skill_tree_data.connections.clear();
-                        selected_node.entity = None;
-                        selected_node.id = None;
+                        // Clear existing tree before loading new one
+                        perform_new_file_action(
+                            &mut commands,
+                            &mut editor_state,
+                            &mut skill_tree_data,
+                            &mut selected_node,
+                        );
 
                         let mut max_id = 0;
                         for node_data in save_data.nodes {
@@ -1058,7 +1124,7 @@ fn ui_system(
                         editor_state.next_node_id = max_id;
                         skill_tree_data.connections = save_data.connections;
                         editor_state.current_file_path = Some(path_to_load);
-                        editor_state.dirty = false;
+                        editor_state.dirty = false; // Loaded file is not dirty
                     }
                     editor_state.show_load_dialog = false;
                 }
@@ -1067,6 +1133,25 @@ fn ui_system(
                     editor_state.show_load_dialog = false;
                 }
             });
+    }
+
+    let action_to_trigger = mem::replace(
+        &mut editor_state.trigger_pending_action,
+        NextActionAfterSaveAs::None,
+    );
+    match action_to_trigger {
+        NextActionAfterSaveAs::ShowLoadDialog => {
+            open_load_dialog_sequence(&mut editor_state);
+        }
+        NextActionAfterSaveAs::CreateNewFile => {
+            perform_new_file_action(
+                &mut commands,
+                &mut editor_state,
+                &mut skill_tree_data,
+                &mut selected_node,
+            );
+        }
+        NextActionAfterSaveAs::None => {}
     }
 }
 
