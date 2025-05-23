@@ -9,7 +9,6 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin};
 
 // TODO: UNDO / REDO SYSTEM
-// TODO: IMAGE LOADING
 // TODO: ADD CONTROL POINTS FOR CONNECTIONS
 
 const GRID_SIZE: f32 = 50.0;
@@ -486,7 +485,6 @@ pub fn spawn_node(
             },
             Transform::from_translation(node_data.position.extend(0.0)),
             Sprite {
-                color: Color::srgb(0.5, 0.5, 0.6),
                 custom_size: Some(Vec2::splat(60.0)),
                 image: node_images.skill_node.clone(),
                 ..default()
