@@ -20,6 +20,20 @@ pub struct ConnectionData {
     pub to_id: u32,
     #[serde(default)]
     pub control_points: Vec<Vec2>,
+    #[serde(default)]
+    pub curve_type: CurveType,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum CurveType {
+    Straight,
+    Arc { radius: f32, clockwise: bool },
+}
+
+impl Default for CurveType {
+    fn default() -> Self {
+        CurveType::Straight
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -109,6 +123,11 @@ pub struct SkillTreeData {
 pub struct SelectedNode {
     pub entity: Option<Entity>,
     pub id: Option<u32>,
+}
+
+#[derive(Resource, Default)]
+pub struct SelectedConnection {
+    pub index: Option<usize>,
 }
 
 #[derive(Resource, Default)]

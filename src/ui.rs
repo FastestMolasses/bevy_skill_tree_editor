@@ -1,16 +1,17 @@
+use super::spawn_node;
 use crate::components::*;
 use crate::fs::{load_skill_tree, save_skill_tree};
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 use std::path::PathBuf;
 use std::{fs, mem};
-use super::spawn_node;
 
 pub fn ui_system(
     mut contexts: EguiContexts,
     mut editor_state: ResMut<EditorState>,
     mut skill_tree_data: ResMut<SkillTreeData>,
     mut selected_node: ResMut<SelectedNode>,
+    mut selected_connection: ResMut<SelectedConnection>,
     mut node_query: Query<&mut SkillNode>,
     mut commands: Commands,
     connection_mode: Res<ConnectionMode>,
@@ -32,6 +33,7 @@ pub fn ui_system(
                             &mut editor_state,
                             &mut skill_tree_data,
                             &mut selected_node,
+                            &mut selected_connection,
                         );
                     }
                     ui.close_menu();
@@ -112,7 +114,73 @@ pub fn ui_system(
             ui.separator();
         }
 
-        if let Some(entity) = selected_node.entity {
+        // Connection Properties
+        if let Some(connection_index) = selected_connection.index {
+            if let Some(connection) = skill_tree_data.connections.get_mut(connection_index) {
+                ui.heading("Connection Properties");
+                ui.label(format!(
+                    "From Node {} to Node {}",
+                    connection.from_id, connection.to_id
+                ));
+
+                ui.separator();
+                ui.label("Curve Type:");
+
+                let mut curve_type_changed = false;
+                let is_straight = matches!(connection.curve_type, CurveType::Straight);
+
+                if ui.radio(is_straight, "Straight").clicked() {
+                    connection.curve_type = CurveType::Straight;
+                    curve_type_changed = true;
+                }
+
+                if ui.radio(!is_straight, "Arc").clicked() {
+                    connection.curve_type = CurveType::Arc {
+                        radius: 100.0,
+                        clockwise: false,
+                    };
+                    curve_type_changed = true;
+                }
+
+                if let CurveType::Arc {
+                    ref mut radius,
+                    ref mut clockwise,
+                } = connection.curve_type
+                {
+                    ui.separator();
+                    ui.label("Arc Properties:");
+
+                    if ui
+                        .add(egui::Slider::new(radius, 30.0..=500.0).text("Radius"))
+                        .changed()
+                    {
+                        curve_type_changed = true;
+                    }
+
+                    if ui.checkbox(clockwise, "Clockwise").changed() {
+                        curve_type_changed = true;
+                    }
+
+                    ui.add_space(5.0);
+                    ui.label("Tips:");
+                    ui.label("• Larger radius = gentler curve");
+                    ui.label("• Toggle clockwise to flip the arc");
+                }
+
+                if curve_type_changed {
+                    editor_state.dirty = true;
+                }
+
+                ui.separator();
+                if ui.button("Delete Connection").clicked() {
+                    skill_tree_data.connections.remove(connection_index);
+                    selected_connection.index = None;
+                    editor_state.dirty = true;
+                }
+            }
+        }
+        // Node Properties
+        else if let Some(entity) = selected_node.entity {
             if let Ok(mut node) = node_query.get_mut(entity) {
                 ui.heading("Node Properties");
                 ui.label(format!("ID: {}", node.id));
@@ -246,21 +314,34 @@ pub fn ui_system(
                 }
             }
         } else {
-            ui.label("No node selected");
+            ui.label("No node or connection selected");
             ui.separator();
             ui.label("Right-click to create a node");
-            ui.label("Left-click to select a node");
+            ui.label("Left-click to select nodes/connections");
             ui.label("Right-click on nodes to connect");
             ui.label("Middle mouse or Shift + Left Drag to pan");
             ui.label("Scroll to zoom");
+            ui.label("Delete/Backspace to remove selected");
         }
         ui.separator();
-        ui.heading("Connections");
+        ui.heading("All Connections");
         let mut connection_to_remove_idx = None;
         for (i, connection) in skill_tree_data.connections.iter().enumerate() {
             ui.horizontal(|ui| {
-                ui.label(format!("{} -> {}", connection.from_id, connection.to_id));
-                if ui.button("Remove").clicked() {
+                let connection_text = match &connection.curve_type {
+                    CurveType::Straight => format!("{} -> {}", connection.from_id, connection.to_id),
+                    CurveType::Arc { .. } => {
+                        format!("{} ⌒ {}", connection.from_id, connection.to_id)
+                    }
+                };
+
+                if ui.button(connection_text).clicked() {
+                    selected_connection.index = Some(i);
+                    selected_node.entity = None;
+                    selected_node.id = None;
+                }
+
+                if ui.button("×").clicked() {
                     connection_to_remove_idx = Some(i);
                     editor_state.dirty = true;
                 }
@@ -268,6 +349,9 @@ pub fn ui_system(
         }
         if let Some(index) = connection_to_remove_idx {
             skill_tree_data.connections.remove(index);
+            if selected_connection.index == Some(index) {
+                selected_connection.index = None;
+            }
         }
     });
 
@@ -374,7 +458,7 @@ pub fn ui_system(
                                 &skill_tree_data,
                                 &node_query,
                             );
-                            perform_new_file_action(&mut commands, &mut editor_state, &mut skill_tree_data, &mut selected_node);
+                            perform_new_file_action(&mut commands, &mut editor_state, &mut skill_tree_data, &mut selected_node, &mut selected_connection);
                             editor_state.show_unsaved_changes_on_new_dialog = false;
                         } else {
                             editor_state.next_action_after_save_as = NextActionAfterSaveAs::CreateNewFile;
@@ -392,7 +476,7 @@ pub fn ui_system(
                         }
                     }
                     if ui.button("Don't Save").clicked() {
-                        perform_new_file_action(&mut commands, &mut editor_state, &mut skill_tree_data, &mut selected_node);
+                        perform_new_file_action(&mut commands, &mut editor_state, &mut skill_tree_data, &mut selected_node, &mut selected_connection);
                         editor_state.show_unsaved_changes_on_new_dialog = false;
                     }
                     if ui.button("Cancel").clicked() {
@@ -482,6 +566,7 @@ pub fn ui_system(
                             &mut editor_state,
                             &mut skill_tree_data,
                             &mut selected_node,
+                            &mut selected_connection,
                         );
 
                         let mut max_id = 0;
@@ -520,6 +605,7 @@ pub fn ui_system(
                 &mut editor_state,
                 &mut skill_tree_data,
                 &mut selected_node,
+                &mut selected_connection,
             );
         }
         NextActionAfterSaveAs::None => {}
@@ -545,6 +631,7 @@ fn perform_new_file_action(
     editor_state: &mut EditorState,
     skill_tree_data: &mut SkillTreeData,
     selected_node: &mut SelectedNode,
+    selected_connection: &mut SelectedConnection,
 ) {
     for entity in skill_tree_data.nodes.values() {
         commands.entity(*entity).despawn();
@@ -553,6 +640,7 @@ fn perform_new_file_action(
     skill_tree_data.connections.clear();
     selected_node.entity = None;
     selected_node.id = None;
+    selected_connection.index = None;
     editor_state.current_file_path = None;
     editor_state.next_node_id = 0;
     editor_state.dirty = false;

@@ -12,6 +12,7 @@ use bevy_egui::{EguiContexts, EguiPlugin};
 // TODO: ADD CONTROL POINTS FOR CONNECTIONS
 
 const GRID_SIZE: f32 = 50.0;
+const ARC_SEGMENTS: u32 = 32; // Number of segments to approximate an arc
 
 fn main() {
     App::new()
@@ -24,6 +25,7 @@ fn main() {
         .init_resource::<EditorState>()
         .init_resource::<SkillTreeData>()
         .init_resource::<SelectedNode>()
+        .init_resource::<SelectedConnection>()
         .init_resource::<DragState>()
         .init_resource::<ConnectionMode>()
         .init_resource::<EditorCamera>()
@@ -41,6 +43,7 @@ fn main() {
                     handle_mouse_input,
                     handle_node_selection,
                     handle_node_dragging,
+                    handle_connection_selection,
                     update_node_visuals,
                     draw_connections,
                     draw_grid,
@@ -165,10 +168,8 @@ fn handle_mouse_input(
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
     mut editor_state: ResMut<EditorState>,
     mut skill_tree_data: ResMut<SkillTreeData>,
-    editor_camera: Res<EditorCamera>,
-    selected_node: Res<SelectedNode>,
     mut connection_mode: ResMut<ConnectionMode>,
-    node_query: Query<(Entity, &SkillNode, &Transform)>,
+    node_query: Query<(&SkillNode, &Transform)>,
     egui_input_state: Res<EguiInputState>,
     keyboard: Res<ButtonInput<KeyCode>>,
     grid_settings: Res<GridSettings>,
@@ -201,7 +202,7 @@ fn handle_mouse_input(
 
             if mouse_button.just_pressed(MouseButton::Right) {
                 let mut clicked_node = None;
-                for (entity, node, transform) in node_query.iter() {
+                for (node, transform) in node_query.iter() {
                     let distance = world_position.distance(transform.translation.xy());
                     if distance < 30.0 {
                         clicked_node = Some(node.id);
@@ -217,6 +218,7 @@ fn handle_mouse_input(
                                 from_id: start_id,
                                 to_id: node_id,
                                 control_points: vec![],
+                                curve_type: CurveType::Straight,
                             });
                             editor_state.dirty = true;
                         }
@@ -256,6 +258,7 @@ fn handle_node_selection(
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
     node_query: Query<(Entity, &SkillNode, &Transform)>,
     mut selected_node: ResMut<SelectedNode>,
+    mut selected_connection: ResMut<SelectedConnection>,
     mut drag_state: ResMut<DragState>,
     egui_input_state: Res<EguiInputState>,
     keyboard: Res<ButtonInput<KeyCode>>,
@@ -298,6 +301,7 @@ fn handle_node_selection(
             if let Some((entity, id, node_pos)) = closest_node {
                 selected_node.entity = Some(entity);
                 selected_node.id = Some(id);
+                selected_connection.index = None;
                 drag_state.dragging = true;
                 drag_state.offset = node_pos - world_position;
             } else {
@@ -305,6 +309,132 @@ fn handle_node_selection(
                 selected_node.id = None;
             }
         }
+    }
+}
+
+fn handle_connection_selection(
+    mouse_button: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    skill_tree_data: Res<SkillTreeData>,
+    node_query: Query<(&SkillNode, &Transform)>,
+    mut selected_connection: ResMut<SelectedConnection>,
+    mut selected_node: ResMut<SelectedNode>,
+    egui_input_state: Res<EguiInputState>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+) {
+    if !mouse_button.just_pressed(MouseButton::Left) {
+        return;
+    }
+
+    if egui_input_state.wants_pointer_input {
+        return;
+    }
+
+    let shift_pressed =
+        keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
+    if shift_pressed {
+        return;
+    }
+
+    let Ok(window) = windows.single() else {
+        return;
+    };
+
+    let Ok((camera, camera_transform)) = camera_query.single() else {
+        return;
+    };
+
+    if let Some(cursor_position) = window.cursor_position() {
+        if let Ok(world_position) = camera.viewport_to_world_2d(camera_transform, cursor_position) {
+            // Check if we're clicking on a node first
+            for (node, transform) in node_query.iter() {
+                let distance = world_position.distance(transform.translation.xy());
+                if distance < 30.0 {
+                    return; // Clicking on a node, don't select connection
+                }
+            }
+
+            // Check connections
+            for (index, connection) in skill_tree_data.connections.iter().enumerate() {
+                let mut from_pos = None;
+                let mut to_pos = None;
+
+                for (node, transform) in node_query.iter() {
+                    if node.id == connection.from_id {
+                        from_pos = Some(transform.translation.xy());
+                    }
+                    if node.id == connection.to_id {
+                        to_pos = Some(transform.translation.xy());
+                    }
+                }
+
+                if let (Some(from), Some(to)) = (from_pos, to_pos) {
+                    let distance = match &connection.curve_type {
+                        CurveType::Straight => point_to_line_distance(world_position, from, to),
+                        CurveType::Arc { radius, clockwise } => {
+                            point_to_arc_distance(world_position, from, to, *radius, *clockwise)
+                        }
+                    };
+
+                    if distance < 10.0 {
+                        selected_connection.index = Some(index);
+                        selected_node.entity = None;
+                        selected_node.id = None;
+                        return;
+                    }
+                }
+            }
+
+            // Didn't click on anything
+            selected_connection.index = None;
+        }
+    }
+}
+
+fn point_to_line_distance(point: Vec2, line_start: Vec2, line_end: Vec2) -> f32 {
+    let line_vec = line_end - line_start;
+    let point_vec = point - line_start;
+    let line_len_sq = line_vec.length_squared();
+
+    if line_len_sq == 0.0 {
+        return point_vec.length();
+    }
+
+    let t = (point_vec.dot(line_vec) / line_len_sq).clamp(0.0, 1.0);
+    let projection = line_start + line_vec * t;
+    (point - projection).length()
+}
+
+fn point_to_arc_distance(point: Vec2, start: Vec2, end: Vec2, radius: f32, clockwise: bool) -> f32 {
+    if let Some((center, start_angle, end_angle)) =
+        calculate_arc_center(start, end, radius, clockwise)
+    {
+        let to_point = point - center;
+        let point_dist = to_point.length();
+        let point_angle = to_point.y.atan2(to_point.x);
+
+        // Check if angle is within arc range
+        let angle_in_range = if clockwise {
+            if start_angle > end_angle {
+                point_angle >= end_angle && point_angle <= start_angle
+            } else {
+                point_angle >= end_angle || point_angle <= start_angle
+            }
+        } else if start_angle < end_angle {
+            point_angle >= start_angle && point_angle <= end_angle
+        } else {
+            point_angle >= start_angle || point_angle <= end_angle
+        };
+
+        if angle_in_range {
+            (point_dist - radius).abs()
+        } else {
+            // Point is outside arc range, return distance to nearest endpoint
+            point.distance(start).min(point.distance(end))
+        }
+    } else {
+        f32::MAX
     }
 }
 
@@ -371,6 +501,7 @@ fn handle_keyboard_shortcuts(
     mut commands: Commands,
     keyboard: Res<ButtonInput<KeyCode>>,
     mut selected_node: ResMut<SelectedNode>,
+    mut selected_connection: ResMut<SelectedConnection>,
     mut skill_tree_data: ResMut<SkillTreeData>,
     egui_input_state: Res<EguiInputState>,
     mut editor_state: ResMut<EditorState>,
@@ -379,7 +510,7 @@ fn handle_keyboard_shortcuts(
         return;
     }
 
-    if keyboard.just_pressed(KeyCode::Backspace) {
+    if keyboard.just_pressed(KeyCode::Backspace) || keyboard.just_pressed(KeyCode::Delete) {
         if let Some(node_id_to_delete) = selected_node.id {
             if let Some(entity_to_delete) = selected_node.entity {
                 skill_tree_data.connections.retain(|conn| {
@@ -391,6 +522,12 @@ fn handle_keyboard_shortcuts(
 
                 selected_node.entity = None;
                 selected_node.id = None;
+                editor_state.dirty = true;
+            }
+        } else if let Some(connection_index) = selected_connection.index {
+            if connection_index < skill_tree_data.connections.len() {
+                skill_tree_data.connections.remove(connection_index);
+                selected_connection.index = None;
                 editor_state.dirty = true;
             }
         }
@@ -417,12 +554,42 @@ fn update_node_visuals(
     }
 }
 
+fn calculate_arc_center(
+    start: Vec2,
+    end: Vec2,
+    radius: f32,
+    clockwise: bool,
+) -> Option<(Vec2, f32, f32)> {
+    let mid = (start + end) * 0.5;
+    let half_chord = (end - start) * 0.5;
+    let chord_length = half_chord.length();
+
+    if chord_length > radius {
+        return None; // Radius too small for the given points
+    }
+
+    let h = (radius * radius - chord_length * chord_length).sqrt();
+    let direction = Vec2::new(-half_chord.y, half_chord.x).normalize();
+
+    let center = if clockwise {
+        mid - direction * h
+    } else {
+        mid + direction * h
+    };
+
+    let start_angle = (start - center).y.atan2((start - center).x);
+    let end_angle = (end - center).y.atan2((end - center).x);
+
+    Some((center, start_angle, end_angle))
+}
+
 fn draw_connections(
     mut gizmos: Gizmos,
     skill_tree_data: Res<SkillTreeData>,
     node_query: Query<(&SkillNode, &Transform)>,
+    selected_connection: Res<SelectedConnection>,
 ) {
-    for connection in &skill_tree_data.connections {
+    for (index, connection) in skill_tree_data.connections.iter().enumerate() {
         let mut from_pos = None;
         let mut to_pos = None;
 
@@ -436,7 +603,66 @@ fn draw_connections(
         }
 
         if let (Some(from), Some(to)) = (from_pos, to_pos) {
-            gizmos.line_2d(from, to, Color::srgb(0.7, 0.6, 0.4));
+            let is_selected = selected_connection.index == Some(index);
+            let color = if is_selected {
+                Color::srgb(0.9, 0.7, 0.3)
+            } else {
+                Color::srgb(0.7, 0.6, 0.4)
+            };
+
+            match &connection.curve_type {
+                CurveType::Straight => {
+                    gizmos.line_2d(from, to, color);
+                }
+                CurveType::Arc { radius, clockwise } => {
+                    draw_arc(&mut gizmos, from, to, *radius, *clockwise, color);
+                }
+            }
+        }
+    }
+}
+
+fn draw_arc(
+    gizmos: &mut Gizmos,
+    start: Vec2,
+    end: Vec2,
+    radius: f32,
+    clockwise: bool,
+    color: Color,
+) {
+    if let Some((center, start_angle, end_angle)) =
+        calculate_arc_center(start, end, radius, clockwise)
+    {
+        let mut angle_range = if clockwise {
+            if start_angle < end_angle {
+                start_angle - end_angle + std::f32::consts::TAU
+            } else {
+                start_angle - end_angle
+            }
+        } else if end_angle < start_angle {
+            end_angle - start_angle + std::f32::consts::TAU
+        } else {
+            end_angle - start_angle
+        };
+
+        angle_range = angle_range.abs();
+
+        let segments = (ARC_SEGMENTS as f32 * (angle_range / std::f32::consts::TAU)).ceil() as u32;
+        let segments = segments.max(4);
+
+        let mut prev_point = start;
+
+        for i in 1..=segments {
+            let t = i as f32 / segments as f32;
+            let angle = if clockwise {
+                start_angle - angle_range * t
+            } else {
+                start_angle + angle_range * t
+            };
+
+            let point = center + Vec2::new(angle.cos(), angle.sin()) * radius;
+            gizmos.line_2d(prev_point, point, color);
+            prev_point = point;
         }
     }
 }
