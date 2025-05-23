@@ -161,6 +161,36 @@ pub fn ui_system(
                         curve_type_changed = true;
                     }
 
+                    // Check if arc is valid and show warning
+                    let mut from_pos = None;
+                    let mut to_pos = None;
+                    for node in node_query.iter() {
+                        if node.id == connection.from_id {
+                            from_pos = Some(node.data.position);
+                        }
+                        if node.id == connection.to_id {
+                            to_pos = Some(node.data.position);
+                        }
+                    }
+
+                    if let (Some(from), Some(to)) = (from_pos, to_pos) {
+                        let distance = from.distance(to);
+                        let min_radius = distance / 2.0;
+
+                        if *radius < min_radius {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(255, 200, 100),
+                                format!("⚠ Radius too small! Minimum: {min_radius:.1}"),
+                            );
+                            ui.label("Arc will display as dashed line");
+
+                            if ui.button("Auto-fix radius").clicked() {
+                                *radius = min_radius + 10.0; // Add a small buffer
+                                curve_type_changed = true;
+                            }
+                        }
+                    }
+
                     ui.add_space(5.0);
                     ui.label("Tips:");
                     ui.label("• Larger radius = gentler curve");
@@ -328,14 +358,47 @@ pub fn ui_system(
         let mut connection_to_remove_idx = None;
         for (i, connection) in skill_tree_data.connections.iter().enumerate() {
             ui.horizontal(|ui| {
+                // Check if arc is valid
+                let mut is_invalid_arc = false;
+                if let CurveType::Arc { radius, .. } = &connection.curve_type {
+                    let mut from_pos = None;
+                    let mut to_pos = None;
+                    for node in node_query.iter() {
+                        if node.id == connection.from_id {
+                            from_pos = Some(node.data.position);
+                        }
+                        if node.id == connection.to_id {
+                            to_pos = Some(node.data.position);
+                        }
+                    }
+                    if let (Some(from), Some(to)) = (from_pos, to_pos) {
+                        let distance = from.distance(to);
+                        is_invalid_arc = *radius < distance / 2.0;
+                    }
+                }
+
                 let connection_text = match &connection.curve_type {
-                    CurveType::Straight => format!("{} -> {}", connection.from_id, connection.to_id),
+                    CurveType::Straight => format!("{} → {}", connection.from_id, connection.to_id),
                     CurveType::Arc { .. } => {
-                        format!("{} ⌒ {}", connection.from_id, connection.to_id)
+                        if is_invalid_arc {
+                            format!("{} ⚠ {}", connection.from_id, connection.to_id)
+                        } else {
+                            format!("{} ⤷ {}", connection.from_id, connection.to_id)
+                        }
                     }
                 };
 
-                if ui.button(connection_text).clicked() {
+                let selected = selected_connection.index == Some(i);
+                let button = if selected {
+                    ui.add(
+                        egui::Button::new(connection_text)
+                            .fill(egui::Color32::from_rgb(60, 80, 100)),
+                    )
+                } else {
+                    ui.button(connection_text)
+                };
+
+                if button.clicked() {
                     selected_connection.index = Some(i);
                     selected_node.entity = None;
                     selected_node.id = None;

@@ -9,10 +9,10 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin};
 
 // TODO: UNDO / REDO SYSTEM
-// TODO: ADD CONTROL POINTS FOR CONNECTIONS
 
 const GRID_SIZE: f32 = 50.0;
-const ARC_SEGMENTS: u32 = 32; // Number of segments to approximate an arc
+/// Number of segments to approximate an arc
+const ARC_SEGMENTS: u32 = 32;
 
 fn main() {
     App::new()
@@ -214,13 +214,27 @@ fn handle_mouse_input(
                     if connection_mode.active && connection_mode.start_node.is_some() {
                         let start_id = connection_mode.start_node.unwrap();
                         if start_id != node_id {
-                            skill_tree_data.connections.push(ConnectionData {
-                                from_id: start_id,
-                                to_id: node_id,
-                                control_points: vec![],
-                                curve_type: CurveType::Straight,
-                            });
-                            editor_state.dirty = true;
+                            // Check if connection already exists (in either direction)
+                            let connection_exists =
+                                skill_tree_data.connections.iter().any(|conn| {
+                                    (conn.from_id == start_id && conn.to_id == node_id)
+                                        || (conn.from_id == node_id && conn.to_id == start_id)
+                                });
+
+                            if !connection_exists {
+                                skill_tree_data.connections.push(ConnectionData {
+                                    from_id: start_id,
+                                    to_id: node_id,
+                                    control_points: vec![],
+                                    curve_type: CurveType::Straight,
+                                });
+                                editor_state.dirty = true;
+                            } else {
+                                info!(
+                                    "Connection already exists between nodes {} and {}",
+                                    start_id, node_id
+                                );
+                            }
                         }
                         connection_mode.active = false;
                         connection_mode.start_node = None;
@@ -348,7 +362,7 @@ fn handle_connection_selection(
     if let Some(cursor_position) = window.cursor_position() {
         if let Ok(world_position) = camera.viewport_to_world_2d(camera_transform, cursor_position) {
             // Check if we're clicking on a node first
-            for (node, transform) in node_query.iter() {
+            for (_, transform) in node_query.iter() {
                 let distance = world_position.distance(transform.translation.xy());
                 if distance < 30.0 {
                     return; // Clicking on a node, don't select connection
@@ -373,7 +387,9 @@ fn handle_connection_selection(
                     let distance = match &connection.curve_type {
                         CurveType::Straight => point_to_line_distance(world_position, from, to),
                         CurveType::Arc { radius, clockwise } => {
+                            // If arc is invalid, fall back to straight line distance
                             point_to_arc_distance(world_position, from, to, *radius, *clockwise)
+                                .unwrap_or_else(|| point_to_line_distance(world_position, from, to))
                         }
                     };
 
@@ -406,7 +422,13 @@ fn point_to_line_distance(point: Vec2, line_start: Vec2, line_end: Vec2) -> f32 
     (point - projection).length()
 }
 
-fn point_to_arc_distance(point: Vec2, start: Vec2, end: Vec2, radius: f32, clockwise: bool) -> f32 {
+fn point_to_arc_distance(
+    point: Vec2,
+    start: Vec2,
+    end: Vec2,
+    radius: f32,
+    clockwise: bool,
+) -> Option<f32> {
     if let Some((center, start_angle, end_angle)) =
         calculate_arc_center(start, end, radius, clockwise)
     {
@@ -428,13 +450,13 @@ fn point_to_arc_distance(point: Vec2, start: Vec2, end: Vec2, radius: f32, clock
         };
 
         if angle_in_range {
-            (point_dist - radius).abs()
+            Some((point_dist - radius).abs())
         } else {
             // Point is outside arc range, return distance to nearest endpoint
-            point.distance(start).min(point.distance(end))
+            Some(point.distance(start).min(point.distance(end)))
         }
     } else {
-        f32::MAX
+        None
     }
 }
 
@@ -564,8 +586,9 @@ fn calculate_arc_center(
     let half_chord = (end - start) * 0.5;
     let chord_length = half_chord.length();
 
+    // If radius is too small, return None to indicate invalid arc
     if chord_length > radius {
-        return None; // Radius too small for the given points
+        return None;
     }
 
     let h = (radius * radius - chord_length * chord_length).sqrt();
@@ -615,7 +638,11 @@ fn draw_connections(
                     gizmos.line_2d(from, to, color);
                 }
                 CurveType::Arc { radius, clockwise } => {
-                    draw_arc(&mut gizmos, from, to, *radius, *clockwise, color);
+                    // Try to draw arc, fall back to straight line if invalid
+                    if !draw_arc(&mut gizmos, from, to, *radius, *clockwise, color) {
+                        // Arc is invalid, draw dashed line to indicate issue
+                        draw_dashed_line(&mut gizmos, from, to, color);
+                    }
                 }
             }
         }
@@ -629,7 +656,7 @@ fn draw_arc(
     radius: f32,
     clockwise: bool,
     color: Color,
-) {
+) -> bool {
     if let Some((center, start_angle, end_angle)) =
         calculate_arc_center(start, end, radius, clockwise)
     {
@@ -664,6 +691,32 @@ fn draw_arc(
             gizmos.line_2d(prev_point, point, color);
             prev_point = point;
         }
+        true
+    } else {
+        false
+    }
+}
+
+fn draw_dashed_line(gizmos: &mut Gizmos, start: Vec2, end: Vec2, color: Color) {
+    let dash_length = 10.0;
+    let gap_length = 5.0;
+    let total_length = start.distance(end);
+    let direction = (end - start).normalize();
+
+    let mut current_pos = 0.0;
+    let mut drawing = true;
+
+    while current_pos < total_length {
+        if drawing {
+            let dash_end = (current_pos + dash_length).min(total_length);
+            let start_point = start + direction * current_pos;
+            let end_point = start + direction * dash_end;
+            gizmos.line_2d(start_point, end_point, color);
+            current_pos = dash_end;
+        } else {
+            current_pos += gap_length;
+        }
+        drawing = !drawing;
     }
 }
 
