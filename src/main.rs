@@ -30,6 +30,7 @@ fn main() {
         .init_resource::<EditorCamera>()
         .init_resource::<EguiInputState>()
         .init_resource::<GridSettings>()
+        .init_resource::<NodeImages>()
         .add_systems(Startup, setup)
         .add_systems(
             Update,
@@ -52,7 +53,12 @@ fn main() {
         .run();
 }
 
-fn setup(mut commands: Commands, mut grid_settings: ResMut<GridSettings>) {
+fn setup(
+    mut commands: Commands,
+    mut grid_settings: ResMut<GridSettings>,
+    mut node_images: ResMut<NodeImages>,
+    asset_server: Res<AssetServer>,
+) {
     commands.spawn((
         Camera2d,
         Camera {
@@ -62,6 +68,8 @@ fn setup(mut commands: Commands, mut grid_settings: ResMut<GridSettings>) {
     ));
     grid_settings.grid_size = GRID_SIZE;
     grid_settings.snap_to_grid = true;
+
+    node_images.skill_node = asset_server.load("skill_border_01.png");
 }
 
 fn update_egui_input_state(
@@ -165,6 +173,7 @@ fn handle_mouse_input(
     egui_input_state: Res<EguiInputState>,
     keyboard: Res<ButtonInput<KeyCode>>,
     grid_settings: Res<GridSettings>,
+    node_images: Res<NodeImages>,
 ) {
     if egui_input_state.wants_pointer_input {
         return;
@@ -229,7 +238,7 @@ fn handle_mouse_input(
                         stats: vec![],
                     };
 
-                    let entity = spawn_node(&mut commands, &node_data);
+                    let entity = spawn_node(&mut commands, &node_data, &node_images);
                     skill_tree_data.nodes.insert(node_data.id, entity);
                     editor_state.next_node_id += 1;
                     editor_state.dirty = true;
@@ -464,14 +473,11 @@ fn draw_grid(mut gizmos: Gizmos, grid_settings: Res<GridSettings>) {
     }
 }
 
-pub fn spawn_node(commands: &mut Commands, node_data: &SkillNodeData) -> Entity {
-    let size = match node_data.node_type {
-        NodeType::Normal => 40.0,
-        NodeType::Notable => 50.0,
-        NodeType::Keystone => 60.0,
-        NodeType::Start => 55.0,
-    };
-
+pub fn spawn_node(
+    commands: &mut Commands,
+    node_data: &SkillNodeData,
+    node_images: &NodeImages,
+) -> Entity {
     commands
         .spawn((
             SkillNode {
@@ -481,7 +487,8 @@ pub fn spawn_node(commands: &mut Commands, node_data: &SkillNodeData) -> Entity 
             Transform::from_translation(node_data.position.extend(0.0)),
             Sprite {
                 color: Color::srgb(0.5, 0.5, 0.6),
-                custom_size: Some(Vec2::splat(size)),
+                custom_size: Some(Vec2::splat(60.0)),
+                image: node_images.skill_node.clone(),
                 ..default()
             },
         ))

@@ -89,6 +89,11 @@ pub struct EditorState {
 }
 
 #[derive(Resource, Default)]
+pub struct NodeImages {
+    pub skill_node: Handle<Image>,
+}
+
+#[derive(Resource, Default)]
 pub struct GridSettings {
     pub snap_to_grid: bool,
     pub grid_size: f32,

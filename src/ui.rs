@@ -15,6 +15,7 @@ pub fn ui_system(
     mut commands: Commands,
     connection_mode: Res<ConnectionMode>,
     mut grid_settings: ResMut<GridSettings>,
+    node_images: Res<NodeImages>,
 ) {
     let ctx = contexts.ctx_mut();
 
@@ -485,7 +486,7 @@ pub fn ui_system(
 
                         let mut max_id = 0;
                         for node_data in save_data.nodes {
-                            let entity = spawn_node(&mut commands, &node_data);
+                            let entity = spawn_node(&mut commands, &node_data, &node_images);
                             skill_tree_data.nodes.insert(node_data.id, entity);
                             if node_data.id >= max_id {
                                 max_id = node_data.id + 1;
