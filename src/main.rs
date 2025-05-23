@@ -398,32 +398,22 @@ fn handle_keyboard_shortcuts(
 }
 
 fn update_node_visuals(
-    mut node_query: Query<(&SkillNode, &Children), Without<Text>>,
-    mut sprite_query: Query<&mut Sprite>,
+    mut node_query: Query<(&SkillNode, &mut Sprite)>,
     selected_node: Res<SelectedNode>,
     connection_mode: Res<ConnectionMode>,
 ) {
-    for (node, children) in node_query.iter_mut() {
+    for (node, mut sprite) in node_query.iter_mut() {
         let is_selected = selected_node.id == Some(node.id);
         let is_connection_start =
             connection_mode.active && connection_mode.start_node == Some(node.id);
 
-        for child in children.iter() {
-            if let Ok(mut sprite) = sprite_query.get_mut(child) {
-                sprite.color = if is_selected {
-                    Color::srgb(0.3, 0.8, 0.3)
-                } else if is_connection_start {
-                    Color::srgb(0.8, 0.8, 0.3)
-                } else {
-                    match node.data.node_type {
-                        NodeType::Normal => Color::srgb(0.5, 0.5, 0.6),
-                        NodeType::Notable => Color::srgb(0.6, 0.5, 0.8),
-                        NodeType::Keystone => Color::srgb(0.8, 0.5, 0.5),
-                        NodeType::Start => Color::srgb(0.5, 0.8, 0.5),
-                    }
-                };
-            }
-        }
+        sprite.color = if is_connection_start {
+            Color::srgb(0.3, 0.5, 0.8)
+        } else if is_selected {
+            Color::srgb(0.3, 0.8, 0.4)
+        } else {
+            Color::srgb(1.0, 1.0, 1.0)
+        };
     }
 }
 
