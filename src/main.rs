@@ -225,7 +225,6 @@ fn handle_mouse_input(
                                 skill_tree_data.connections.push(ConnectionData {
                                     from_id: start_id,
                                     to_id: node_id,
-                                    control_points: vec![],
                                     curve_type: CurveType::Straight,
                                 });
                                 editor_state.dirty = true;
@@ -720,24 +719,65 @@ fn draw_dashed_line(gizmos: &mut Gizmos, start: Vec2, end: Vec2, color: Color) {
     }
 }
 
-fn draw_grid(mut gizmos: Gizmos, grid_settings: Res<GridSettings>) {
+fn draw_grid(
+    mut gizmos: Gizmos,
+    grid_settings: Res<GridSettings>,
+    camera_query: Query<(&Transform), With<Camera2d>>,
+    windows: Query<&Window>,
+    editor_camera: Res<EditorCamera>,
+) {
     if !grid_settings.snap_to_grid {
         return;
     }
-    let grid_size = grid_settings.grid_size;
-    let grid_count = 50;
-    let half_size = (grid_count as f32 * grid_size) / 2.0;
 
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Ok(camera_transform) = camera_query.single() else {
+        return;
+    };
+
+    // Get the viewport dimensions in world space
+    let window_size = Vec2::new(window.width(), window.height());
+    let half_width = window_size.x * 0.5 * editor_camera.zoom;
+    let half_height = window_size.y * 0.5 * editor_camera.zoom;
+
+    // Calculate visible bounds in world space
+    let camera_pos = camera_transform.translation.xy();
+    let min_x = camera_pos.x - half_width;
+    let max_x = camera_pos.x + half_width;
+    let min_y = camera_pos.y - half_height;
+    let max_y = camera_pos.y + half_height;
+
+    let grid_size = grid_settings.grid_size;
     let color = Color::srgba(0.3, 0.3, 0.3, 0.2);
 
-    for i in 0..=grid_count {
-        let x = -half_size + (i as f32 * grid_size);
-        gizmos.line_2d(Vec2::new(x, -half_size), Vec2::new(x, half_size), color);
+    // Calculate the range of grid lines to draw
+    // Add a small buffer to ensure smooth appearance when panning
+    let buffer = grid_size;
+    let start_x = ((min_x - buffer) / grid_size).floor() as i32;
+    let end_x = ((max_x + buffer) / grid_size).ceil() as i32;
+    let start_y = ((min_y - buffer) / grid_size).floor() as i32;
+    let end_y = ((max_y + buffer) / grid_size).ceil() as i32;
+
+    // Draw vertical lines
+    for i in start_x..=end_x {
+        let x = i as f32 * grid_size;
+        gizmos.line_2d(
+            Vec2::new(x, min_y - buffer),
+            Vec2::new(x, max_y + buffer),
+            color,
+        );
     }
 
-    for i in 0..=grid_count {
-        let y = -half_size + (i as f32 * grid_size);
-        gizmos.line_2d(Vec2::new(-half_size, y), Vec2::new(half_size, y), color);
+    // Draw horizontal lines
+    for i in start_y..=end_y {
+        let y = i as f32 * grid_size;
+        gizmos.line_2d(
+            Vec2::new(min_x - buffer, y),
+            Vec2::new(max_x + buffer, y),
+            color,
+        );
     }
 }
 

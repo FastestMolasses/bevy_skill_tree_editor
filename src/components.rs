@@ -19,8 +19,6 @@ pub struct ConnectionData {
     pub from_id: u32,
     pub to_id: u32,
     #[serde(default)]
-    pub control_points: Vec<Vec2>,
-    #[serde(default)]
     pub curve_type: CurveType,
 }
 
