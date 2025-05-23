@@ -180,7 +180,7 @@ pub fn ui_system(
                         if *radius < min_radius {
                             ui.colored_label(
                                 egui::Color32::from_rgb(255, 200, 100),
-                                format!("⚠ Radius too small! Minimum: {min_radius:.1}"),
+                                format!("⚠ Radius too small! Minimum: {:.1}", min_radius),
                             );
                             ui.label("Arc will display as dashed line");
 
@@ -355,67 +355,91 @@ pub fn ui_system(
         }
         ui.separator();
         ui.heading("All Connections");
-        let mut connection_to_remove_idx = None;
-        for (i, connection) in skill_tree_data.connections.iter().enumerate() {
-            ui.horizontal(|ui| {
-                // Check if arc is valid
-                let mut is_invalid_arc = false;
-                if let CurveType::Arc { radius, .. } = &connection.curve_type {
-                    let mut from_pos = None;
-                    let mut to_pos = None;
-                    for node in node_query.iter() {
-                        if node.id == connection.from_id {
-                            from_pos = Some(node.data.position);
-                        }
-                        if node.id == connection.to_id {
-                            to_pos = Some(node.data.position);
-                        }
-                    }
-                    if let (Some(from), Some(to)) = (from_pos, to_pos) {
-                        let distance = from.distance(to);
-                        is_invalid_arc = *radius < distance / 2.0;
+
+        // Use available height for the scroll area
+        let available_height = ui.available_height();
+
+        egui::ScrollArea::vertical()
+            .max_height(available_height)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+
+                let mut connection_to_remove_idx = None;
+                for (i, connection) in skill_tree_data.connections.iter().enumerate() {
+                    // Use a full-width group to make the entire row scrollable
+                    ui.group(|ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            // Check if arc is valid
+                            let mut is_invalid_arc = false;
+                            if let CurveType::Arc { radius, .. } = &connection.curve_type {
+                                let mut from_pos = None;
+                                let mut to_pos = None;
+                                for node in node_query.iter() {
+                                    if node.id == connection.from_id {
+                                        from_pos = Some(node.data.position);
+                                    }
+                                    if node.id == connection.to_id {
+                                        to_pos = Some(node.data.position);
+                                    }
+                                }
+                                if let (Some(from), Some(to)) = (from_pos, to_pos) {
+                                    let distance = from.distance(to);
+                                    is_invalid_arc = *radius < distance / 2.0;
+                                }
+                            }
+
+                            let connection_text = match &connection.curve_type {
+                                CurveType::Straight => {
+                                    format!("{} → {}", connection.from_id, connection.to_id)
+                                }
+                                CurveType::Arc { .. } => {
+                                    if is_invalid_arc {
+                                        format!("{} ⚠ {}", connection.from_id, connection.to_id)
+                                    } else {
+                                        format!("{} ⤷ {}", connection.from_id, connection.to_id)
+                                    }
+                                }
+                            };
+
+                            let selected = selected_connection.index == Some(i);
+                            let button = if selected {
+                                ui.add(
+                                    egui::Button::new(connection_text)
+                                        .fill(egui::Color32::from_rgb(60, 80, 100)),
+                                )
+                            } else {
+                                ui.button(connection_text)
+                            };
+
+                            if button.clicked() {
+                                selected_connection.index = Some(i);
+                                selected_node.entity = None;
+                                selected_node.id = None;
+                            }
+
+                            if ui.button("×").clicked() {
+                                connection_to_remove_idx = Some(i);
+                                editor_state.dirty = true;
+                            }
+                        });
+                    });
+                }
+
+                if let Some(index) = connection_to_remove_idx {
+                    skill_tree_data.connections.remove(index);
+                    if selected_connection.index == Some(index) {
+                        selected_connection.index = None;
+                    } else if selected_connection.index.is_some()
+                        && selected_connection.index.unwrap() > index
+                    {
+                        // Adjust selected index if a connection before it was removed
+                        selected_connection.index = Some(selected_connection.index.unwrap() - 1);
                     }
                 }
 
-                let connection_text = match &connection.curve_type {
-                    CurveType::Straight => format!("{} → {}", connection.from_id, connection.to_id),
-                    CurveType::Arc { .. } => {
-                        if is_invalid_arc {
-                            format!("{} ⚠ {}", connection.from_id, connection.to_id)
-                        } else {
-                            format!("{} ⤷ {}", connection.from_id, connection.to_id)
-                        }
-                    }
-                };
-
-                let selected = selected_connection.index == Some(i);
-                let button = if selected {
-                    ui.add(
-                        egui::Button::new(connection_text)
-                            .fill(egui::Color32::from_rgb(60, 80, 100)),
-                    )
-                } else {
-                    ui.button(connection_text)
-                };
-
-                if button.clicked() {
-                    selected_connection.index = Some(i);
-                    selected_node.entity = None;
-                    selected_node.id = None;
-                }
-
-                if ui.button("×").clicked() {
-                    connection_to_remove_idx = Some(i);
-                    editor_state.dirty = true;
-                }
+                ui.add_space(10.0);
             });
-        }
-        if let Some(index) = connection_to_remove_idx {
-            skill_tree_data.connections.remove(index);
-            if selected_connection.index == Some(index) {
-                selected_connection.index = None;
-            }
-        }
     });
 
     if editor_state.show_save_as_dialog {
